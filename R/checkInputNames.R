@@ -23,7 +23,7 @@
 #'
 #' @return A named list with the aligned and sanitized \code{targetData},
 #'   \code{regulatoryData}, \code{metadata} and \code{priorAssociations}
-#'   (whose first two columns are renamed to \code{regulator} and \code{gene}),
+#'   (whose first two columns are renamed to \code{regulator} and \code{target}),
 #'   plus \code{nameMap}: a list with the original and sanitized names of the
 #'   features that were renamed (\code{target} and one entry per layer).
 #'
@@ -111,8 +111,8 @@ checkInputNames <- function(targetData,
     }
 
     # First column = regulator, second column = target. Extra columns are kept
-    colnames(assoc_df) = c("regulator", "gene")
-    colnames(assoc_df)[1:2] <- c("regulator", "gene")
+    colnames(assoc_df) = c("regulator", "target")
+    colnames(assoc_df)[1:2] <- c("regulator", "target")
     assoc_df[[1]] <- make.names(as.character(assoc_df[[1]]))
     assoc_df[[2]] <- make.names(as.character(assoc_df[[2]]))
 

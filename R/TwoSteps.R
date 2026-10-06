@@ -62,7 +62,7 @@ fitTwoStep <- function(targetExpr,
 #' For each regulator of each layer fits a null mixed model with
 #' \code{\link{fitTwoStep}} and replaces the regulator by its residuals.
 #' This removes the sample (donor, batch) structure from the regulators before
-#' the gene-level models of step 2 are fitted.
+#' the target-level models of step 2 are fitted.
 #'
 #' @details
 #' Sparse layers are transposed once so that extracting the values of a

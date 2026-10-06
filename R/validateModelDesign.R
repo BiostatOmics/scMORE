@@ -16,8 +16,6 @@
 #' (their contrasts cannot be estimated).
 #'
 #' @param metadata Data.frame with cell metadata. Row names must be cell IDs.
-#' Character vector with the metadata columns used as fixed
-#'   effects (for example \code{c("condition", "cell_type")}).
 #' @param fixedEffects Character vector of \code{metadata} columns used as
 #'  fixed tearm.
 #' @param randomEffects Character vector of \code{metadata} columns used
