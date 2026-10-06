@@ -92,7 +92,7 @@
 #'
 #' @examples
 #' \dontrun{
-#' fit <- fitMore(
+#' fit <- fitMORE(
 #'   targetData        = targetData,
 #'   regulatoryData    = list(ATAC = atacMatrix, TFs = tfActivity),
 #'   priorAssociations = list(ATAC = regionGeneLinks, TFs = tfGeneEdges),
@@ -106,10 +106,9 @@
 #' @importFrom cli cli_h2 cli_alert_info cli_alert_warning cli_alert_success cli_abort
 #' @importFrom pbapply pblapply
 #' @export
-fitMore <- function(targetData,
+fitMORE <- function(targetData,
                     regulatoryData,
                     priorAssociations,
-                    omicType,
                     metadata,
                     fixedEffects  = NULL,
                     randomEffects = NULL,
@@ -123,6 +122,8 @@ fitMore <- function(targetData,
 
   #Set the seed for the reproducibility
   set.seed(seed)
+
+  cli::cli_h1("Running scMORE")
 
   # Internal modelling choices
   targetOmicType <- 0

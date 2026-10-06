@@ -78,6 +78,7 @@ fitTargetModel <- function(target,
 
   # ~~~~~~~~~~ 1. Design matrix construction ~~~~~~~~~~ #
   # Extract regulatory features associated with the target
+  design_vars <- unique(c(fixedEffects, randomEffects))
   target_expr <- targetData[target, ]
   reg_sub <- t(as.matrix(regData[regulators, , drop = FALSE]))
 

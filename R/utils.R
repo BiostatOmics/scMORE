@@ -93,7 +93,7 @@ uniqueValues <- function(mat) {
 #'
 #' @param priorAssociations Named list of data.frames (one per regulatory
 #'   layer) or a single data.frame. Each table must contain the columns
-#'   \code{regulator} and \code{gene} (as produced by \code{\link{checkInputNames}}).
+#'   \code{regulator} and \code{target} (as produced by \code{\link{checkInputNames}}).
 #'   Additional columns are ignored.
 #'
 #' @return A named list. Names are target features and each element is a
@@ -107,12 +107,12 @@ preparePriorDict <- function(priorAssociations) {
 
   prior_df <- do.call(rbind, lapply(priorAssociations, function(df) {
     df <- as.data.frame(df, stringsAsFactors = FALSE)
-    df[, c("regulator", "gene"), drop = FALSE]
+    df[, c("regulator", "target"), drop = FALSE]
   }))
   prior_df <- unique(prior_df)
   rownames(prior_df) <- NULL
 
-  split(as.character(prior_df$regulator), as.character(prior_df$gene))
+  split(as.character(prior_df$regulator), as.character(prior_df$target))
 }
 
 

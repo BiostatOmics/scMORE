@@ -171,4 +171,4 @@ validateModelDesign <- function(metadata,
     fixedEffects  = fixedEffects,
     randomEffects = randomEffects
   )
-}}
+}
