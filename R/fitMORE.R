@@ -124,6 +124,7 @@ fitMORE <- function(targetData,
   set.seed(seed)
 
   cli::cli_h1("Running scMORE")
+  cli::cli_h2("Fit regulatory models for every target feature")
 
   # Internal modelling choices
   targetOmicType <- 0
