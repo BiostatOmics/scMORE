@@ -102,7 +102,6 @@
 #'
 #' @importFrom emmeans as.emmGrid emmeans
 #' @importFrom stats as.formula
-#' @importFrom pbapply pblapply
 #' @export
 testRegulation <- function(fit,
                            by               = NULL,
@@ -139,65 +138,22 @@ testRegulation <- function(fit,
       "i" = "Available: {.val {fixedEffects}}."
     ))
   }
-  if (!is.null(at)) {
-    if (!is.list(at) || is.null(names(at))) {
-      cli::cli_abort("{.arg at} must be a named list, for example {.code list(cell_type = \"Tcell\")}.")
-    }
-    bad_at <- setdiff(names(at), fixedEffects)
-    if (length(bad_at) > 0) {
-      cli::cli_abort("{.arg at} contains variables that are not fixed effects of the model: {.val {bad_at}}.")
-    }
-  }
   if (isFALSE(fit$GlobalSummary$args$interaction)) {
     cli::cli_alert_warning("The model was fitted with {.code interaction = FALSE}: slopes do not depend on the fixed effects, so all groups give the same result.")
   }
 
-  # ~~~~~~~~~~ 2. Select models ~~~~~~~~~~ #
-  models <- fit$Models
-  if (!is.null(targets)) models <- models[intersect(targets, names(models))]
-  if (length(models) == 0) cli::cli_abort("No targets to analyse.")
+  # ~~~~~~~~~~ 2. Select models and validate against the stored grid ~~~~~~~~~~ #
+  models  <- selectModels(fit, targets)
+  layerOf <- layerLookup(fit)
+  checkLayers(layers, fit)
 
-  priors  <- fit$GlobalSummary$priorAssociations
-  layerOf <- unlist(lapply(names(priors), function(l) {
-    regs <- unique(as.character(priors[[l]]$regulator))
-    stats::setNames(rep(l, length(regs)), regs)
-  }))
-
-  if (!is.null(layers)) {
-    bad_layers <- setdiff(layers, names(priors))
-    if (length(bad_layers) > 0) {
-      cli::cli_abort("Unknown layer(s): {.val {bad_layers}}. Available: {.val {names(priors)}}.")
-    }
-  }
-
-  # Read the stored grid of the first available model: used to validate `at`
-  # and to know which fixed effects will be averaged over
-  first_trend <- NULL
-  for (m in models) {
-    ok <- Filter(Negate(is.null), m$fit)
-    if (length(ok) > 0) { first_trend <- ok[[1]]; break }
-  }
-  if (is.null(first_trend)) cli::cli_abort("None of the selected targets has a fitted model.")
-  grid0 <- emmeans::as.emmGrid(first_trend)@grid
-
-  if (!is.null(at)) {
-    for (v in names(at)) {
-      avail <- unique(as.character(grid0[[v]]))
-      miss  <- setdiff(as.character(at[[v]]), avail)
-      if (length(miss) > 0) {
-        cli::cli_abort(c(
-          "Level(s) {.val {miss}} not found in {.field {v}}.",
-          "i" = "Available levels: {.val {avail}}."
-        ))
-      }
-    }
-  }
+  # The stored grid of the first model is used to validate `at` and to know
+  # which fixed effects will be averaged over
+  grid0 <- firstTrendGrid(models)
+  checkAt(at, fixedEffects, grid0)
 
   # Fixed effects not in `by` that still have several levels are averaged over
-  n_levels <- function(v) {
-    if (!is.null(at[[v]])) length(unique(at[[v]])) else length(unique(as.character(grid0[[v]])))
-  }
-  averaged <- Filter(function(v) n_levels(v) > 1, setdiff(fixedEffects, by))
+  averaged <- Filter(function(v) nLevelsAt(v, at, grid0) > 1, setdiff(fixedEffects, by))
   if (length(averaged) > 0 && !isFALSE(fit$GlobalSummary$args$interaction)) {
     cli::cli_alert_info(c(
       "Slopes are averaged over {.field {averaged}} ({weights} weights). ",
@@ -208,19 +164,11 @@ testRegulation <- function(fit,
 
   specs <- stats::as.formula(paste("~", if (length(by) > 0) paste(by, collapse = " + ") else "1"))
 
-  # Restrict the stored grid to the requested levels
-  subsetGrid <- function(emm, at) {
-    keep <- rep(TRUE, nrow(emm@grid))
-    for (v in names(at)) keep <- keep & (as.character(emm@grid[[v]]) %in% as.character(at[[v]]))
-    if (!any(keep)) return(NULL)
-    emm[which(keep)]
-  }
-
   # ~~~~~~~~~~ 3. Test every target-regulator pair ~~~~~~~~~~ #
   testOne <- function(trend, reg) {
     emm <- emmeans::as.emmGrid(trend)
     if (!is.null(at)) {
-      emm <- subsetGrid(emm, at)
+      emm <- subsetTrendGrid(emm, at)
       if (is.null(emm)) stop("none of the requested levels in `at` exist in the model")
     }
     # Average over the fixed effects that are not in `by` (see `weights`).
@@ -244,48 +192,14 @@ testRegulation <- function(fit,
     s
   }
 
-  # Loop over targets (with progress bar) and, inside, over their regulators.
-  # A failure in one pair never stops the loop: it is stored in `fail` and
-  # reported at the end through attr(, "failed")
-  res_list <- pbapply::pblapply(names(models), function(g) {
-    trends <- models[[g]]$fit
-    if (is.null(trends)) return(NULL)
-
-    regs <- names(trends)
-    if (!is.null(regulators)) regs <- intersect(regs, regulators)
-    if (!is.null(layers))     regs <- regs[layerOf[regs] %in% layers]
-
-    out <- lapply(regs, function(reg) {
-      if (is.null(trends[[reg]])) return(list(ok = NULL, fail = c(g, reg, "slopes could not be estimated")))
-      tryCatch({
-        s <- testOne(trends[[reg]], reg)
-        list(ok = cbind(target = g, regulator = reg, layer = unname(layerOf[reg]), s,
-                        stringsAsFactors = FALSE), fail = NULL)
-      }, error = function(e) list(ok = NULL, fail = c(g, reg, conditionMessage(e))))
-    })
-    list(ok   = do.call(rbind, lapply(out, `[[`, "ok")),
-         fail = do.call(rbind, lapply(out, `[[`, "fail")))
-  })
-
-  res <- do.call(rbind, lapply(res_list, `[[`, "ok"))
-  failed <- do.call(rbind, lapply(res_list, `[[`, "fail"))
-  if (!is.null(failed)) {
-    failed <- as.data.frame(failed, stringsAsFactors = FALSE)
-    names(failed) <- c("target", "regulator", "reason")
-  }
-
-  if (is.null(res) || nrow(res) == 0) {
-    cli::cli_abort("No regulator-target pairs could be tested. Check {.arg at}, {.arg regulators} and {.arg layers}.")
-  }
+  # Test every pair. A failure in one pair never stops the loop: it is collected
+  # and reported at the end through attr(, "failed") (see testPairs())
+  pairs_out <- testPairs(models, regulators, layers, layerOf, testOne, verb = "tested")
+  res       <- pairs_out$res
+  failed    <- pairs_out$failed
 
   # ~~~~~~~~~~ 4. Tidy columns ~~~~~~~~~~ #
-  # emmeans names columns differently for mixed models (asymptotic z) and for
-  # lm (t with df), so both sets of names are mapped to common ones
-  rename <- c(SE = "std.error", asymp.LCL = "conf.low", lower.CL = "conf.low",
-              asymp.UCL = "conf.high", upper.CL = "conf.high",
-              z.ratio = "statistic", t.ratio = "statistic")
-  for (old in names(rename)) names(res)[names(res) == old] <- rename[[old]]
-  res$null <- NULL
+  res <- tidyEmmeansColumns(res)
 
   res$group <- if (length(by) > 0) do.call(paste, c(lapply(res[by], as.character), sep = " / ")) else "overall"
 
@@ -322,19 +236,7 @@ testRegulation <- function(fit,
                   "statistic", "p.value", "p.adj", "direction", "significant")
   res <- res[, c(first, intersect(stats_cols, names(res))), drop = FALSE]
 
-  if (useOriginalNames) {
-    nm  <- fit$GlobalSummary$nameMap
-    inv <- function(map) stats::setNames(names(map), unname(map))
-    if (length(nm$target) > 0) {
-      i <- inv(nm$target); hit <- res$target %in% names(i); res$target[hit] <- i[res$target[hit]]
-    }
-    for (l in names(priors)) {
-      if (length(nm[[l]]) == 0) next
-      i <- inv(nm[[l]]); hit <- res$layer == l & res$regulator %in% names(i)
-      res$regulator[hit] <- i[res$regulator[hit]]
-    }
-  }
-
+  if (useOriginalNames) res <- restoreOriginalNames(res, fit)
   if (onlySignificant) res <- res[res$significant, , drop = FALSE]
   res <- res[order(res$p.adj, na.last = TRUE), , drop = FALSE]
   rownames(res) <- NULL
