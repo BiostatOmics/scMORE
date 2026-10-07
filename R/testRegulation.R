@@ -3,8 +3,8 @@
 #' Uses the regulator slopes stored by \code{\link{fitMore}} to test, for every
 #' target and regulator, whether the regulator has an effect (slope different
 #' from zero) in each group defined by one or several fixed effects of the model.
-#' P-values are adjusted for multiple testing and the result is returned as a
-#' tidy table.
+#' P-values can be adjusted within each target-regulator pair (see Details) and
+#' the result is returned as a tidy table.
 #'
 #' @details
 #' \code{fitMore} stores the slope of every regulator for each combination of all
@@ -27,8 +27,19 @@
 #' }
 #' Each test is a Wald test of \eqn{H_0: \text{slope} = 0}{H0: slope = 0} using
 #' the asymptotic (normal) approximation, which can be optimistic when the number
-#' of samples is small. The family of tests used for the multiple testing
-#' correction is set with \code{adjustBy}.
+#' of samples is small.
+#'
+#' \strong{Multiple testing.} P-values are adjusted only at the level of the
+#' test, as in \code{emmeans::test(..., adjust = )}: the family of tests is the
+#' set of groups returned for one target-regulator pair (for example the
+#' condition x cell type combinations of one regulator of one gene). No
+#' correction is applied across targets, regulators or layers, so a list of
+#' significant regulators obtained with this function does not control the false
+#' discovery rate of the whole analysis. The unadjusted p-value is always
+#' returned in \code{p.value}, so a correction over the whole table can be applied
+#' afterwards, for example \code{res$q <- p.adjust(res$p.value, "BH")}. Confidence
+#' intervals are never adjusted. A global correction (over all tests, by group or
+#' by layer) is not implemented yet: the code is left commented in the source.
 #'
 #' If the model was fitted with \code{interaction = FALSE}, slopes do not depend
 #' on the fixed effects, so every group returns the same result.
@@ -43,12 +54,13 @@
 #'   effects of the model.
 #' @param weights Either \code{"equal"} (default) or \code{"proportional"}. See
 #'   Details.
-#' @param alpha Numeric. Significance threshold applied to the adjusted p-value.
-#' @param adjust Method passed to \code{\link[stats]{p.adjust}}. Defaults to
-#'   \code{"BH"}.
-#' @param adjustBy Family of tests for the correction: \code{"global"} (all tests
-#'   together), \code{"group"} (separately within each group) or \code{"layer"}
-#'   (separately within each regulatory layer).
+#' @param alpha Numeric. Significance threshold applied to the adjusted p-value
+#'   (\code{p.adj}).
+#' @param adjust Method used by \code{emmeans} to adjust the p-values of the
+#'   groups of each target-regulator pair. One of \code{"fdr"} (default, the same
+#'   as \code{"BH"}), \code{"none"}, \code{"holm"}, \code{"bonferroni"},
+#'   \code{"BH"}, \code{"BY"}, \code{"hochberg"}, \code{"hommel"},
+#'   \code{"sidak"} or \code{"mvt"}. See Details.
 #' @param minEffect Numeric. Minimum absolute slope for a regulator to be called
 #'   significant. Defaults to 0 (no threshold).
 #' @param targets,regulators,layers Optional character vectors to restrict the
@@ -65,7 +77,8 @@
 #'   regulator and group and the columns \code{target}, \code{regulator},
 #'   \code{layer}, one column per variable in \code{by}, \code{group},
 #'   \code{estimate} (slope), \code{std.error}, \code{conf.low},
-#'   \code{conf.high}, \code{statistic}, \code{p.value}, \code{p.adj},
+#'   \code{conf.high}, \code{statistic}, \code{p.value} (unadjusted),
+#'   \code{p.adj} (adjusted within the target-regulator pair),
 #'   \code{direction} (\code{"activator"} or \code{"repressor"}, according to the
 #'   sign of the slope) and \code{significant}. Regulator-target pairs whose
 #'   slopes could not be estimated are listed in the attribute \code{failed}.
@@ -79,12 +92,16 @@
 #' testRegulation(fit, by = "condition", at = list(cell_type = "Tcell"),
 #'                onlySignificant = TRUE)
 #'
-#' # Every condition x cell type combination, FDR within each group
-#' testRegulation(fit, adjustBy = "group")
+#' # Holm instead of FDR within each regulator-target pair
+#' testRegulation(fit, adjust = "holm")
+#'
+#' # Correction over the whole table, applied afterwards on the raw p-values
+#' res <- testRegulation(fit, adjust = "none")
+#' res$q <- p.adjust(res$p.value, method = "BH")
 #' }
 #'
 #' @importFrom emmeans as.emmGrid emmeans
-#' @importFrom stats p.adjust ave as.formula
+#' @importFrom stats as.formula
 #' @importFrom pbapply pblapply
 #' @export
 testRegulation <- function(fit,
@@ -92,8 +109,10 @@ testRegulation <- function(fit,
                            at               = NULL,
                            weights          = c("equal", "proportional"),
                            alpha            = 0.05,
-                           adjust           = "BH",
-                           adjustBy         = c("global", "group", "layer"),
+                           adjust           = c("fdr", "none", "holm", "bonferroni", "BH",
+                                                "BY", "hochberg", "hommel", "sidak", "mvt"),
+                           # FUTURE: global correction (see section 5 below)
+                           # adjustBy       = c("global", "group", "layer", "pair"),
                            minEffect        = 0,
                            targets          = NULL,
                            regulators       = NULL,
@@ -101,8 +120,9 @@ testRegulation <- function(fit,
                            onlySignificant  = FALSE,
                            useOriginalNames = FALSE) {
 
-  weights  <- match.arg(weights)
-  adjustBy <- match.arg(adjustBy)
+  weights <- match.arg(weights)
+  adjust  <- match.arg(adjust)
+  # adjustBy <- match.arg(adjustBy)   # FUTURE: see section 5
 
   # ~~~~~~~~~~ 1. Validate arguments ~~~~~~~~~~ #
   if (!inherits(fit, "scMoreFit")) {
@@ -150,26 +170,40 @@ testRegulation <- function(fit,
     }
   }
 
-  # Validate the requested levels against the stored grid
+  # Read the stored grid of the first available model: used to validate `at`
+  # and to know which fixed effects will be averaged over
+  first_trend <- NULL
+  for (m in models) {
+    ok <- Filter(Negate(is.null), m$fit)
+    if (length(ok) > 0) { first_trend <- ok[[1]]; break }
+  }
+  if (is.null(first_trend)) cli::cli_abort("None of the selected targets has a fitted model.")
+  grid0 <- emmeans::as.emmGrid(first_trend)@grid
+
   if (!is.null(at)) {
-    first_trend <- NULL
-    for (m in models) {
-      ok <- Filter(Negate(is.null), m$fit)
-      if (length(ok) > 0) { first_trend <- ok[[1]]; break }
-    }
-    if (!is.null(first_trend)) {
-      grid0 <- emmeans::as.emmGrid(first_trend)@grid
-      for (v in names(at)) {
-        avail <- unique(as.character(grid0[[v]]))
-        miss  <- setdiff(as.character(at[[v]]), avail)
-        if (length(miss) > 0) {
-          cli::cli_abort(c(
-            "Level(s) {.val {miss}} not found in {.field {v}}.",
-            "i" = "Available levels: {.val {avail}}."
-          ))
-        }
+    for (v in names(at)) {
+      avail <- unique(as.character(grid0[[v]]))
+      miss  <- setdiff(as.character(at[[v]]), avail)
+      if (length(miss) > 0) {
+        cli::cli_abort(c(
+          "Level(s) {.val {miss}} not found in {.field {v}}.",
+          "i" = "Available levels: {.val {avail}}."
+        ))
       }
     }
+  }
+
+  # Fixed effects not in `by` that still have several levels are averaged over
+  n_levels <- function(v) {
+    if (!is.null(at[[v]])) length(unique(at[[v]])) else length(unique(as.character(grid0[[v]])))
+  }
+  averaged <- Filter(function(v) n_levels(v) > 1, setdiff(fixedEffects, by))
+  if (length(averaged) > 0 && !isFALSE(fit$GlobalSummary$args$interaction)) {
+    cli::cli_alert_info(c(
+      "Slopes are averaged over {.field {averaged}} ({weights} weights). ",
+      "As the model includes interactions, an averaged slope can hide opposite effects in different levels; ",
+      "add {.field {averaged}} to {.arg by} to see each level."
+    ))
   }
 
   specs <- stats::as.formula(paste("~", if (length(by) > 0) paste(by, collapse = " + ") else "1"))
@@ -183,21 +217,36 @@ testRegulation <- function(fit,
   }
 
   # ~~~~~~~~~~ 3. Test every target-regulator pair ~~~~~~~~~~ #
-  failed <- list()
-
   testOne <- function(trend, reg) {
     emm <- emmeans::as.emmGrid(trend)
     if (!is.null(at)) {
       emm <- subsetGrid(emm, at)
       if (is.null(emm)) stop("none of the requested levels in `at` exist in the model")
     }
-    sub <- emmeans::emmeans(emm, specs = specs, weights = weights)
-    s   <- as.data.frame(summary(sub, infer = c(TRUE, TRUE), null = 0, adjust = "none"))
+    # Average over the fixed effects that are not in `by` (see `weights`).
+    # emmeans prints a NOTE about interactions on every call: it is reported once above
+    sub <- suppressMessages(emmeans::emmeans(emm, specs = specs, weights = weights))
+
+    # Slopes, standard errors, confidence intervals and Wald tests against 0.
+    # Here everything is unadjusted: `p.value` is the raw p-value
+    s <- as.data.frame(summary(sub, infer = c(TRUE, TRUE), null = 0, adjust = "none"))
     names(s)[names(s) == paste0(reg, ".trend")] <- "estimate"
+
+    # Adjusted p-value. The family of tests is every row of `sub`, that is, the
+    # groups of this single target-regulator pair (same as test(adjust = ) in emmeans).
+    # Confidence intervals are left unadjusted on purpose
+    s$p.adj <- if (adjust == "none") {
+      s$p.value
+    } else {
+      as.data.frame(emmeans::test(sub, null = 0, adjust = adjust))$p.value
+    }
     if (length(by) == 0) s <- s[, setdiff(names(s), "1"), drop = FALSE]
     s
   }
 
+  # Loop over targets (with progress bar) and, inside, over their regulators.
+  # A failure in one pair never stops the loop: it is stored in `fail` and
+  # reported at the end through attr(, "failed")
   res_list <- pbapply::pblapply(names(models), function(g) {
     trends <- models[[g]]$fit
     if (is.null(trends)) return(NULL)
@@ -230,6 +279,8 @@ testRegulation <- function(fit,
   }
 
   # ~~~~~~~~~~ 4. Tidy columns ~~~~~~~~~~ #
+  # emmeans names columns differently for mixed models (asymptotic z) and for
+  # lm (t with df), so both sets of names are mapped to common ones
   rename <- c(SE = "std.error", asymp.LCL = "conf.low", lower.CL = "conf.low",
               asymp.UCL = "conf.high", upper.CL = "conf.high",
               z.ratio = "statistic", t.ratio = "statistic")
@@ -239,12 +290,28 @@ testRegulation <- function(fit,
   res$group <- if (length(by) > 0) do.call(paste, c(lapply(res[by], as.character), sep = " / ")) else "overall"
 
   # ~~~~~~~~~~ 5. Multiple testing correction ~~~~~~~~~~ #
-  family <- switch(adjustBy,
-                   global = rep(1L, nrow(res)),
-                   group  = res$group,
-                   layer  = res$layer)
-  res$p.adj <- stats::ave(res$p.value, family,
-                          FUN = function(p) stats::p.adjust(p, method = adjust))
+  # `p.adj` was already computed in testOne(): emmeans adjusts the groups of each
+  # target-regulator pair. No correction across targets, regulators or layers is
+  # applied for now (the user can use `p.value` for that, see the documentation).
+  #
+  # FUTURE: global correction across the whole table. To enable it, restore the
+  # `adjustBy` argument (signature, match.arg and documentation) and use:
+  #
+  # family <- switch(adjustBy,
+  #                  global = rep(1L, nrow(res)),                # all tests together
+  #                  group  = res$group,                         # one family per group
+  #                  layer  = res$layer,                         # one family per layer
+  #                  pair   = paste(res$target, res$regulator))  # as the current behaviour
+  # res$p.adj <- stats::ave(res$p.value, family,
+  #                         FUN = function(p) stats::p.adjust(p, method = adjust))
+  #
+  # Notes: (1) p.adjust() only knows "holm", "hochberg", "hommel", "bonferroni",
+  # "BH", "BY", "fdr" and "none", so "sidak" and "mvt" would have to be excluded;
+  # (2) with adjustBy = "pair" the result equals the current one; (3) remember to
+  # add "importFrom stats p.adjust ave" to the roxygen header.
+  # Rationale and simulation: in a global BH the proportion of false discoveries
+  # stays at the nominal level, whereas adjusting within each pair does not
+  # control it across thousands of pairs.
 
   res$direction   <- ifelse(res$estimate >= 0, "activator", "repressor")
   res$significant <- !is.na(res$p.adj) & res$p.adj < alpha & abs(res$estimate) >= minEffect
@@ -272,9 +339,10 @@ testRegulation <- function(fit,
   res <- res[order(res$p.adj, na.last = TRUE), , drop = FALSE]
   rownames(res) <- NULL
 
-  n_sig <- sum(res$significant)
+  n_sig   <- sum(res$significant)
+  adj_txt <- if (adjust == "none") "no p-value adjustment" else paste0(adjust, " adjustment within each regulator-target pair")
   cli::cli_alert_success(
-    "Tested {nrow(res)} regulator-target-group combination(s); {n_sig} significant (adjusted p < {alpha}, {adjust}, {adjustBy})."
+    "Tested {nrow(res)} regulator-target-group combination(s); {n_sig} significant (p < {alpha}, {adj_txt})."
   )
   if (!is.null(failed) && nrow(failed) > 0) {
     cli::cli_alert_warning("{nrow(failed)} regulator-target pair(s) could not be tested (see {.code attr(, \"failed\")}).")
@@ -282,6 +350,6 @@ testRegulation <- function(fit,
 
   attr(res, "failed") <- failed
   attr(res, "args")   <- list(by = by, at = at, weights = weights, alpha = alpha,
-                              adjust = adjust, adjustBy = adjustBy, minEffect = minEffect)
+                              adjust = adjust, minEffect = minEffect)
   res
 }
